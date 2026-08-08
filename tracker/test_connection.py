@@ -1,4 +1,4 @@
-from google_sheets import GoogleSheetsTracker
+from tracker.google_sheets import GoogleSheetsTracker
 
 
 def main():
@@ -6,7 +6,7 @@ def main():
 
     title = tracker.test_connection()
 
-    print(f"Google Sheets connection successful.")
+    print("Google Sheets connection successful.")
     print(f"Spreadsheet: {title}")
 
 
