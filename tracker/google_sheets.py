@@ -15,11 +15,77 @@ SCOPES = [
 
 class GoogleSheetsTracker:
     """
-    Minimal Google Sheets client for the Copilot Stock Bot.
+    Google Sheets integration for Copilot Stock Bot.
 
-    This module only handles Google Sheets connectivity.
-    It does NOT contain trading logic.
+    Handles Google Sheets connectivity and basic worksheet operations.
+    Trading logic is intentionally kept outside this module.
     """
+
+    SHEETS = {
+        "Signals": [
+            "Signal ID",
+            "Signal Date",
+            "Signal Time",
+            "Rank",
+            "Symbol",
+            "Stock Name",
+            "Industry",
+            "Close Price",
+            "Entry Price",
+            "Target Price",
+            "Stop Loss",
+            "Score",
+            "RSI",
+            "MACD",
+            "Volume Ratio",
+            "EMA20",
+            "SMA50",
+            "Holding Period",
+            "Risk %",
+            "Reward %",
+            "Risk/Reward",
+            "Status",
+            "Exit Date",
+            "Exit Price",
+            "Return %",
+            "Days Held",
+            "Exit Reason",
+            "Current Price",
+            "Current Return %",
+            "Last Checked",
+        ],
+
+        "Price_Log": [
+            "Date",
+            "Time",
+            "Symbol",
+            "Signal ID",
+            "Signal Date",
+            "Entry Price",
+            "Target Price",
+            "Stop Loss",
+            "Open",
+            "High",
+            "Low",
+            "Close",
+            "Volume",
+            "Current Price",
+            "Target Hit",
+            "SL Hit",
+            "Status",
+            "Data Source",
+        ],
+
+        "Performance": [
+            "Metric",
+            "Value",
+        ],
+
+        "Dashboard": [
+            "Metric",
+            "Value",
+        ],
+    }
 
     def __init__(
         self,
@@ -60,12 +126,16 @@ class GoogleSheetsTracker:
         )
 
         self.client = gspread.authorize(credentials)
+
         self.spreadsheet = self.client.open_by_key(
             self.spreadsheet_id
         )
 
     def get_worksheet(self, worksheet_name: str):
-        return self.spreadsheet.worksheet(worksheet_name)
+
+        return self.spreadsheet.worksheet(
+            worksheet_name
+        )
 
     def append_row(
         self,
@@ -73,7 +143,9 @@ class GoogleSheetsTracker:
         row: List[Any],
     ) -> None:
 
-        worksheet = self.get_worksheet(worksheet_name)
+        worksheet = self.get_worksheet(
+            worksheet_name
+        )
 
         worksheet.append_row(
             row,
@@ -85,7 +157,9 @@ class GoogleSheetsTracker:
         worksheet_name: str,
     ) -> List[dict]:
 
-        worksheet = self.get_worksheet(worksheet_name)
+        worksheet = self.get_worksheet(
+            worksheet_name
+        )
 
         return worksheet.get_all_records()
 
@@ -97,13 +171,59 @@ class GoogleSheetsTracker:
         value: Any,
     ) -> None:
 
-        worksheet = self.get_worksheet(worksheet_name)
+        worksheet = self.get_worksheet(
+            worksheet_name
+        )
 
         worksheet.update_cell(
             row,
             column,
             value,
         )
+
+    def initialize_sheets(self) -> None:
+        """
+        Create/initialize required worksheets and headers.
+        Existing data is preserved.
+        """
+
+        for sheet_name, headers in self.SHEETS.items():
+
+            try:
+                worksheet = self.get_worksheet(
+                    sheet_name
+                )
+
+            except gspread.WorksheetNotFound:
+
+                worksheet = self.spreadsheet.add_worksheet(
+                    title=sheet_name,
+                    rows=1000,
+                    cols=max(len(headers), 20),
+                )
+
+            # Only write headers if sheet is empty.
+            existing_values = worksheet.get_all_values()
+
+            if not existing_values:
+
+                worksheet.append_row(
+                    headers,
+                    value_input_option="USER_ENTERED",
+                )
+
+                # Freeze header row.
+                worksheet.freeze(rows=1)
+
+                # Make header bold.
+                worksheet.format(
+                    "1:1",
+                    {
+                        "textFormat": {
+                            "bold": True
+                        }
+                    },
+                )
 
     def test_connection(self) -> str:
 
