@@ -54,6 +54,20 @@ Use `config.example.yaml` as the template for `config.yaml`.
 
 ## Scheduling
 
+### GitHub Actions (recommended for 8 PM IST)
+
+This repository includes a GitHub Actions workflow that runs every weekday at 8:00 PM IST.
+
+1. In your GitHub repository, add these repository secrets:
+   - `TELEGRAM_BOT_TOKEN`
+   - `TELEGRAM_CHAT_ID`
+2. Push this repository to GitHub.
+3. In the Actions tab, enable the workflow and run it once manually to confirm it works.
+
+The workflow file is [.github/workflows/daily-telegram-alerts.yml](.github/workflows/daily-telegram-alerts.yml).
+
+### Windows Task Scheduler (local fallback)
+
 A helper script is included to run the scan every weekday at 9:00 PM.
 
 1. Create `config.yaml` from `config.example.yaml` and fill in your Telegram settings.
