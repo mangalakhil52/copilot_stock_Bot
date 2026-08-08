@@ -205,12 +205,31 @@ class GoogleSheetsTracker:
             # Only write headers if sheet is empty.
             existing_values = worksheet.get_all_values()
 
-            if not existing_values:
+# Treat completely blank worksheets as empty.
+has_data = any(
+    any(str(cell).strip() for cell in row)
+    for row in existing_values
+)
 
-                worksheet.append_row(
-                    headers,
-                    value_input_option="USER_ENTERED",
-                )
+if not has_data:
+
+    worksheet.append_row(
+        headers,
+        value_input_option="USER_ENTERED",
+    )
+
+    # Freeze header row.
+    worksheet.freeze(rows=1)
+
+    # Make header bold.
+    worksheet.format(
+        "1:1",
+        {
+            "textFormat": {
+                "bold": True
+            }
+        },
+    )
 
                 # Freeze header row.
                 worksheet.freeze(rows=1)
