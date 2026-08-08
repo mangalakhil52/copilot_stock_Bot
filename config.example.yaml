@@ -1,0 +1,17 @@
+telegram:
+  bot_token: YOUR_TELEGRAM_BOT_TOKEN
+  chat_id: YOUR_TELEGRAM_CHAT_ID
+scan:
+  top_n: 3
+  min_close: 50
+  min_volume_ratio: 1.4
+  max_candidates: 300
+  text_filters:
+    exclude_keywords:
+      - NIFTY
+      - BANKNIFTY
+      - CNX
+      - FINNIFTY
+      - SENSEX
+  min_volume: 1000
+  min_score: 0
