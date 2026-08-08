@@ -114,6 +114,30 @@ def command_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def maybe_send_telegram_alert(config: Optional[Dict[str, Any]], picks: List[SwingPick]) -> bool:
+    if not config:
+        return False
+
+    telegram_config = config.get("telegram") or {}
+    bot_token = telegram_config.get("bot_token")
+    chat_id = telegram_config.get("chat_id")
+    if not bot_token or not chat_id:
+        print("Skipping Telegram alert because bot token or chat ID is missing.")
+        return False
+    if "YOUR_TELEGRAM" in str(bot_token) or "YOUR_TELEGRAM" in str(chat_id):
+        print("Skipping Telegram alert because the bot token or chat ID is still a placeholder.")
+        return False
+
+    try:
+        message = format_telegram_alert(picks)
+        send_telegram_alert(bot_token=bot_token, chat_id=chat_id, message=message)
+        print("Telegram alert sent.")
+        return True
+    except Exception as exc:
+        print(f"Telegram alert could not be sent: {exc}")
+        return False
+
+
 def command_notify_telegram(args: argparse.Namespace) -> int:
     config = None
     if args.config:
@@ -122,18 +146,10 @@ def command_notify_telegram(args: argparse.Namespace) -> int:
     picks = run_scan(config)
     print_picks(picks)
 
-    bot_token = args.bot_token
-    chat_id = args.chat_id
     if config:
-        bot_token = bot_token or config.get("telegram", {}).get("bot_token")
-        chat_id = chat_id or config.get("telegram", {}).get("chat_id")
-
-    if not bot_token or not chat_id:
-        raise ValueError("Telegram bot token and chat ID are required to send alerts.")
-
-    message = format_telegram_alert(picks)
-    send_telegram_alert(bot_token=bot_token, chat_id=chat_id, message=message)
-    print("Telegram alert sent.")
+        maybe_send_telegram_alert(config, picks)
+    else:
+        print("No Telegram configuration found. Skipping alert delivery.")
     return 0
 
 
@@ -163,14 +179,7 @@ def main() -> int:
             picks = run_scan(config)
             print_picks(picks)
             if config.get("telegram"):
-                bot_token = config["telegram"].get("bot_token")
-                chat_id = config["telegram"].get("chat_id")
-                if bot_token and chat_id and "YOUR_TELEGRAM" not in bot_token and "YOUR_TELEGRAM" not in str(chat_id):
-                    message = format_telegram_alert(picks)
-                    send_telegram_alert(bot_token=bot_token, chat_id=chat_id, message=message)
-                    print("Telegram alert sent.")
-                else:
-                    print("Telegram is configured in config.yaml, but bot_token or chat_id is missing or still uses placeholder values. Set valid Telegram credentials to send alerts.")
+                maybe_send_telegram_alert(config, picks)
             else:
                 print("No Telegram configuration found in config.yaml. Run with --config or use notify-telegram.")
             return 0
@@ -192,14 +201,7 @@ def main() -> int:
                     json.dump(rows, handle, indent=2)
                 print(f"Wrote output to {args.output_json}")
             if not args.skip_telegram and config.get("telegram"):
-                bot_token = config["telegram"].get("bot_token")
-                chat_id = config["telegram"].get("chat_id")
-                if bot_token and chat_id:
-                    message = format_telegram_alert(picks)
-                    send_telegram_alert(bot_token=bot_token, chat_id=chat_id, message=message)
-                    print("Telegram alert sent.")
-                else:
-                    print("Telegram is configured in config.yaml but bot_token or chat_id is missing.")
+                maybe_send_telegram_alert(config, picks)
             return 0
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
