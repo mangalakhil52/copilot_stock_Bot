@@ -21,6 +21,7 @@ class GoogleSheetsTracker:
     - Connect to Google Sheets using a service account
     - Create required worksheets if missing
     - Initialize worksheet headers
+    - Maintain backward-compatible schema migrations
     - Append rows
     - Read worksheet records
     - Update individual cells
@@ -52,6 +53,7 @@ class GoogleSheetsTracker:
             "Risk %",
             "Reward %",
             "Risk/Reward",
+            "Strategy Version",
             "Status",
             "Exit Date",
             "Exit Price",
@@ -128,7 +130,6 @@ class GoogleSheetsTracker:
 
         try:
             credentials_info = json.loads(credentials_json)
-
         except json.JSONDecodeError as exc:
             raise ValueError(
                 "GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON."
@@ -150,10 +151,7 @@ class GoogleSheetsTracker:
     # ---------------------------------------------------------
 
     def test_connection(self) -> str:
-        """
-        Return the connected spreadsheet name.
-        """
-
+        """Return the connected spreadsheet name."""
         return self.spreadsheet.title
 
     # ---------------------------------------------------------
@@ -161,15 +159,11 @@ class GoogleSheetsTracker:
     # ---------------------------------------------------------
 
     def get_worksheet(self, worksheet_name: str):
-        """
-        Return a worksheet by name.
-        """
-
+        """Return a worksheet by name."""
         try:
             return self.spreadsheet.worksheet(
                 worksheet_name
             )
-
         except gspread.WorksheetNotFound:
             raise ValueError(
                 f"Worksheet '{worksheet_name}' does not exist."
@@ -184,82 +178,95 @@ class GoogleSheetsTracker:
         Create required worksheets if they don't exist.
 
         If a worksheet already exists but is completely blank,
-        the required headers are added.
+        required headers are added.
 
         Existing data is never overwritten.
         """
 
         for sheet_name, headers in self.SHEETS.items():
-
-            # -------------------------------------------------
-            # Get existing worksheet or create it
-            # -------------------------------------------------
-
             try:
-
                 worksheet = self.spreadsheet.worksheet(
                     sheet_name
                 )
-
             except gspread.WorksheetNotFound:
-
                 worksheet = self.spreadsheet.add_worksheet(
                     title=sheet_name,
                     rows=1000,
                     cols=max(len(headers), 20),
                 )
 
-            # -------------------------------------------------
-            # Read existing data
-            # -------------------------------------------------
-
             existing_values = worksheet.get_all_values()
 
-            # -------------------------------------------------
-            # Determine whether sheet actually contains data
-            #
-            # Google Sheets can return blank rows such as:
-            #
-            # [[""]]
-            #
-            # Therefore simply checking:
-            #
-            # if not existing_values
-            #
-            # is not sufficient.
-            # -------------------------------------------------
-
             has_data = any(
-                any(
-                    str(cell).strip()
-                    for cell in row
-                )
+                any(str(cell).strip() for cell in row)
                 for row in existing_values
             )
 
-            # -------------------------------------------------
-            # Add headers only to genuinely empty sheets
-            # -------------------------------------------------
-
             if not has_data:
-
                 worksheet.append_row(
                     headers,
                     value_input_option="USER_ENTERED",
                 )
-
-                # Freeze first row.
                 worksheet.freeze(rows=1)
-
-                # Bold header row.
                 worksheet.format(
                     "1:1",
-                    {
-                        "textFormat": {
-                            "bold": True
-                        }
-                    },
+                    {"textFormat": {"bold": True}},
                 )
+
+        # Apply lightweight migrations to existing sheets.
+        self.ensure_strategy_version_column()
+
+    # ---------------------------------------------------------
+    # SCHEMA MIGRATION
+    # ---------------------------------------------------------
+
+    def ensure_strategy_version_column(self) -> None:
+        """
+        Ensure Signals contains the Strategy Version column.
+
+        Existing rows are legacy Strategy v1 because they were
+        generated before Strategy v2 was deployed. New rows are
+        explicitly tagged by SignalTracker.
+        """
+
+        worksheet = self.get_worksheet("Signals")
+        headers = worksheet.row_values(1)
+
+        column_name = "Strategy Version"
+
+        if column_name in headers:
+            return
+
+        # Add one physical column if required.
+        if len(headers) >= worksheet.col_count:
+            worksheet.add_cols(1)
+
+        new_column = len(headers) + 1
+
+        worksheet.update_cell(
+            1,
+            new_column,
+            column_name,
+        )
+
+        # Existing signals were created by the previous strategy.
+        # Mark them as v1 so historical comparisons are meaningful.
+        records = worksheet.get_all_records()
+
+        for row_number in range(
+            2,
+            len(records) + 2,
+        ):
+            worksheet.update_cell(
+                row_number,
+                new_column,
+                "v1",
+            )
+
+        print(
+            "Google Sheets migration: added Strategy Version column; "
+            "existing signals marked v1."
+        )
 
     # ---------------------------------------------------------
     # APPEND DATA
@@ -270,14 +277,10 @@ class GoogleSheetsTracker:
         worksheet_name: str,
         row: List[Any],
     ) -> None:
-        """
-        Append one row to a worksheet.
-        """
-
+        """Append one row to a worksheet."""
         worksheet = self.get_worksheet(
             worksheet_name
         )
-
         worksheet.append_row(
             row,
             value_input_option="USER_ENTERED",
@@ -292,10 +295,7 @@ class GoogleSheetsTracker:
         worksheet_name: str,
         rows: List[List[Any]],
     ) -> None:
-        """
-        Append multiple rows to a worksheet.
-        """
-
+        """Append multiple rows to a worksheet."""
         if not rows:
             return
 
@@ -316,16 +316,10 @@ class GoogleSheetsTracker:
         self,
         worksheet_name: str,
     ) -> List[dict]:
-        """
-        Return worksheet data as a list of dictionaries.
-
-        First row is treated as the header.
-        """
-
+        """Return worksheet data as dictionaries."""
         worksheet = self.get_worksheet(
             worksheet_name
         )
-
         return worksheet.get_all_records()
 
     # ---------------------------------------------------------
@@ -336,14 +330,10 @@ class GoogleSheetsTracker:
         self,
         worksheet_name: str,
     ) -> List[List[Any]]:
-        """
-        Return raw worksheet values.
-        """
-
+        """Return raw worksheet values."""
         worksheet = self.get_worksheet(
             worksheet_name
         )
-
         return worksheet.get_all_values()
 
     # ---------------------------------------------------------
@@ -357,14 +347,10 @@ class GoogleSheetsTracker:
         column: int,
         value: Any,
     ) -> None:
-        """
-        Update one cell.
-        """
-
+        """Update one cell."""
         worksheet = self.get_worksheet(
             worksheet_name
         )
-
         worksheet.update_cell(
             row,
             column,
@@ -381,14 +367,10 @@ class GoogleSheetsTracker:
         cell_range: str,
         values: List[List[Any]],
     ) -> None:
-        """
-        Update a range of cells.
-        """
-
+        """Update a range of cells."""
         worksheet = self.get_worksheet(
             worksheet_name
         )
-
         worksheet.update(
             cell_range,
             values,
@@ -405,14 +387,7 @@ class GoogleSheetsTracker:
         column_name: str,
         search_value: Any,
     ) -> Optional[int]:
-        """
-        Find the first row where column_name equals search_value.
-
-        Returns:
-            Row number
-            None if not found
-        """
-
+        """Find the first row where column_name equals search_value."""
         worksheet = self.get_worksheet(
             worksheet_name
         )
@@ -424,10 +399,7 @@ class GoogleSheetsTracker:
             start=2,
         ):
             value = record.get(column_name)
-
-            if str(value).strip() == str(
-                search_value
-            ).strip():
+            if str(value).strip() == str(search_value).strip():
                 return index
 
         return None
@@ -440,19 +412,12 @@ class GoogleSheetsTracker:
         self,
         signal_id: str,
     ) -> bool:
-        """
-        Check whether a Signal ID already exists.
-
-        This prevents duplicate signals if GitHub Actions
-        accidentally executes twice.
-        """
-
+        """Check whether a Signal ID already exists."""
         row = self.find_row(
             worksheet_name="Signals",
             column_name="Signal ID",
             search_value=signal_id,
         )
-
         return row is not None
 
     # ---------------------------------------------------------
@@ -464,46 +429,23 @@ class GoogleSheetsTracker:
         signal_id: str,
         updates: dict,
     ) -> bool:
-        """
-        Update fields for an existing signal.
-
-        Example:
-
-        {
-            "Status": "TARGET HIT",
-            "Exit Price": 1500,
-            "Return %": 5.63
-        }
-
-        Returns:
-            True if signal was found and updated.
-            False otherwise.
-        """
-
+        """Update fields for an existing signal."""
         worksheet = self.get_worksheet(
             "Signals"
         )
 
         records = worksheet.get_all_records()
-
         if not records:
             return False
 
         headers = worksheet.row_values(1)
-
         signal_row = None
 
         for index, record in enumerate(
             records,
             start=2,
         ):
-
-            if str(
-                record.get("Signal ID", "")
-            ).strip() == str(
-                signal_id
-            ).strip():
-
+            if str(record.get("Signal ID", "")).strip() == str(signal_id).strip():
                 signal_row = index
                 break
 
@@ -511,16 +453,12 @@ class GoogleSheetsTracker:
             return False
 
         for field, value in updates.items():
-
             if field not in headers:
                 raise ValueError(
                     f"Column '{field}' does not exist in Signals."
                 )
 
-            column_number = (
-                headers.index(field) + 1
-            )
-
+            column_number = headers.index(field) + 1
             worksheet.update_cell(
                 signal_row,
                 column_number,
@@ -534,10 +472,7 @@ class GoogleSheetsTracker:
     # ---------------------------------------------------------
 
     def get_open_signals(self) -> List[dict]:
-        """
-        Return all signals currently marked OPEN.
-        """
-
+        """Return all signals currently marked OPEN."""
         records = self.get_all_records(
             "Signals"
         )
@@ -545,9 +480,7 @@ class GoogleSheetsTracker:
         return [
             record
             for record in records
-            if str(
-                record.get("Status", "")
-            ).strip().upper() == "OPEN"
+            if str(record.get("Status", "")).strip().upper() == "OPEN"
         ]
 
     # ---------------------------------------------------------
@@ -558,14 +491,7 @@ class GoogleSheetsTracker:
         self,
         signal: dict,
     ) -> bool:
-        """
-        Add a signal to the Signals sheet.
-
-        Returns:
-            True  -> added
-            False -> already exists
-        """
-
+        """Add a signal to the Signals sheet."""
         signal_id = signal.get(
             "Signal ID"
         )
@@ -575,10 +501,7 @@ class GoogleSheetsTracker:
                 "Signal must contain 'Signal ID'."
             )
 
-        # Prevent duplicates.
-        if self.signal_exists(
-            signal_id
-        ):
+        if self.signal_exists(signal_id):
             return False
 
         headers = self.SHEETS["Signals"]
@@ -603,14 +526,8 @@ class GoogleSheetsTracker:
         self,
         price_data: dict,
     ) -> None:
-        """
-        Add one market-price observation.
-        """
-
-        headers = self.SHEETS[
-            "Price_Log"
-        ]
-
+        """Add one market-price observation."""
+        headers = self.SHEETS["Price_Log"]
         row = [
             price_data.get(header, "")
             for header in headers
@@ -626,16 +543,12 @@ class GoogleSheetsTracker:
     # ---------------------------------------------------------
 
     def initialize(self) -> None:
-        """
-        Public helper for initializing the complete tracker.
-        """
-
+        """Initialize the complete tracker."""
         self.initialize_sheets()
 
         print(
             "Google Sheets tracker initialized successfully."
         )
-
         print(
             f"Spreadsheet: {self.spreadsheet.title}"
         )
