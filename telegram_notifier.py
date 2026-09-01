@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime
-from typing import List
+from pathlib import Path
+from typing import List, Optional, Sequence
 
 import requests
 
@@ -12,12 +14,7 @@ STRATEGY_VERSION = "v2"
 
 
 def format_telegram_alert(picks: List[SwingPick]) -> str:
-    """
-    Build the daily Telegram alert for the active strategy.
-
-    Telegram is intentionally focused on actionable information:
-    entry, target, stop loss, risk/reward, score and key indicators.
-    """
+    """Build the daily Telegram text alert for the active strategy."""
 
     if not picks:
         return (
@@ -49,13 +46,19 @@ def format_telegram_alert(picks: List[SwingPick]) -> str:
             else 0
         )
 
+        risk_reward = (
+            pick.reward_pct / pick.risk_pct
+            if pick.risk_pct and pick.risk_pct > 0
+            else 0
+        )
+
         block = (
             f"*{index}️⃣ {pick.ticker}* — _{pick.name}_\n"
             f"🏭 Industry: `{pick.industry or 'N/A'}`\n"
             f"💰 Entry: `₹{pick.entry:.2f}`\n"
             f"🎯 Target: `₹{pick.target:.2f}`\n"
             f"🛑 Stop Loss: `₹{pick.stop_loss:.2f}`\n"
-            f"⚖️ Risk/Reward: `1:{pick.reward_pct / pick.risk_pct:.2f}`\n"
+            f"⚖️ Risk/Reward: `1:{risk_reward:.2f}`\n"
             f"📊 Score: `{pick.score:.1f}`\n"
             f"📈 RSI: `{pick.rsi:.1f}`  MACD: `{pick.macd:.2f}`\n"
             f"📦 Volume: `{volume_ratio}`\n"
@@ -69,6 +72,8 @@ def format_telegram_alert(picks: List[SwingPick]) -> str:
     message_lines.extend(
         [
             "",
+            "📊 _A detailed chart for each stock follows this message._",
+            "",
             "⚠️ _For research/tracking only. Validate the setup before taking any trade._",
         ]
     )
@@ -76,31 +81,101 @@ def format_telegram_alert(picks: List[SwingPick]) -> str:
     return "\n".join(message_lines)
 
 
+def _generate_charts(picks: Sequence[SwingPick]) -> List[Path]:
+    """Generate one detailed chart per pick; chart failure never blocks Telegram text."""
+    try:
+        from chart_generator import generate_stock_chart
+        from tracker.market_data import GoogleFinanceMarketData
+
+        if not os.getenv("GOOGLE_SHEET_ID") or not os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"):
+            print("Chart generation skipped: Google Sheets credentials are unavailable.")
+            return []
+
+        market_data = GoogleFinanceMarketData()
+        chart_paths: List[Path] = []
+
+        for pick in picks:
+            try:
+                chart_path = generate_stock_chart(
+                    pick=pick,
+                    market_data=market_data,
+                    lookback_days=140,
+                )
+                if chart_path:
+                    chart_paths.append(chart_path)
+                    print(f"Generated Telegram chart: {chart_path}")
+                else:
+                    print(f"Chart unavailable for {pick.ticker}: insufficient market data.")
+            except Exception as exc:
+                print(f"Chart generation failed for {pick.ticker}: {exc}")
+
+        return chart_paths
+
+    except Exception as exc:
+        print(f"Chart generation setup failed: {exc}")
+        return []
+
+
 def send_telegram_alert(
     bot_token: str,
     chat_id: str,
     message: str,
+    picks: Optional[Sequence[SwingPick]] = None,
 ) -> None:
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    """
+    Send the text alert followed by one detailed chart image per stock.
 
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True,
-    }
+    If chart generation/upload fails, the text alert remains successful.
+    """
+    base_url = f"https://api.telegram.org/bot{bot_token}"
 
-    response = requests.post(
-        url,
-        json=payload,
+    message_response = requests.post(
+        f"{base_url}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True,
+        },
         timeout=30,
     )
+    message_response.raise_for_status()
 
-    response.raise_for_status()
-
-    data = response.json()
-
+    data = message_response.json()
     if not data.get("ok"):
-        raise RuntimeError(
-            f"Telegram send failed: {data}"
+        raise RuntimeError(f"Telegram send failed: {data}")
+
+    if not picks:
+        return
+
+    chart_paths = _generate_charts(picks)
+
+    for pick, chart_path in zip(picks, chart_paths):
+        caption = (
+            f"📈 *{pick.ticker} — Strategy {STRATEGY_VERSION.upper()}*\n"
+            f"Entry ₹{pick.entry:.2f} | Target ₹{pick.target:.2f} | "
+            f"SL ₹{pick.stop_loss:.2f} | R:R 1:{pick.reward_pct / pick.risk_pct:.2f}"
         )
+
+        try:
+            with chart_path.open("rb") as photo:
+                photo_response = requests.post(
+                    f"{base_url}/sendPhoto",
+                    data={
+                        "chat_id": chat_id,
+                        "caption": caption,
+                        "parse_mode": "Markdown",
+                    },
+                    files={"photo": (chart_path.name, photo, "image/png")},
+                    timeout=60,
+                )
+
+            photo_response.raise_for_status()
+            photo_data = photo_response.json()
+            if not photo_data.get("ok"):
+                raise RuntimeError(f"Telegram chart upload failed: {photo_data}")
+
+            print(f"Telegram chart sent: {pick.ticker}")
+
+        except Exception as exc:
+            print(f"Telegram chart upload failed for {pick.ticker}: {exc}")
