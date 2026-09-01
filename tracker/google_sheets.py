@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -14,9 +14,7 @@ SCOPES = [
 
 
 class GoogleSheetsTracker:
-    """
-    Google Sheets integration for Copilot Stock Bot.
-    """
+    """Google Sheets integration with low-read / low-write tracking."""
 
     SHEETS = {
         "Signals": [
@@ -61,26 +59,37 @@ class GoogleSheetsTracker:
         )
         self.client = gspread.authorize(credentials)
         self.spreadsheet = self.client.open_by_key(self.spreadsheet_id)
+        self._worksheet_cache: Dict[str, Any] = {}
+        self._records_cache: Dict[str, List[dict]] = {}
 
     def test_connection(self) -> str:
         return self.spreadsheet.title
 
     def get_worksheet(self, worksheet_name: str):
+        if worksheet_name in self._worksheet_cache:
+            return self._worksheet_cache[worksheet_name]
+
         try:
-            return self.spreadsheet.worksheet(worksheet_name)
-        except gspread.WorksheetNotFound:
-            raise ValueError(f"Worksheet '{worksheet_name}' does not exist.")
+            worksheet = self.spreadsheet.worksheet(worksheet_name)
+        except gspread.WorksheetNotFound as exc:
+            raise ValueError(
+                f"Worksheet '{worksheet_name}' does not exist."
+            ) from exc
+
+        self._worksheet_cache[worksheet_name] = worksheet
+        return worksheet
 
     def initialize_sheets(self) -> None:
         for sheet_name, headers in self.SHEETS.items():
             try:
-                worksheet = self.spreadsheet.worksheet(sheet_name)
-            except gspread.WorksheetNotFound:
+                worksheet = self.get_worksheet(sheet_name)
+            except ValueError:
                 worksheet = self.spreadsheet.add_worksheet(
                     title=sheet_name,
                     rows=1000,
                     cols=max(len(headers), 20),
                 )
+                self._worksheet_cache[sheet_name] = worksheet
 
             existing_values = worksheet.get_all_values()
             has_data = any(
@@ -89,83 +98,169 @@ class GoogleSheetsTracker:
             )
 
             if not has_data:
-                worksheet.append_row(headers, value_input_option="USER_ENTERED")
+                worksheet.append_row(
+                    headers,
+                    value_input_option="USER_ENTERED",
+                )
                 worksheet.freeze(rows=1)
-                worksheet.format("1:1", {"textFormat": {"bold": True}})
+                worksheet.format(
+                    "1:1",
+                    {"textFormat": {"bold": True}},
+                )
 
         self.ensure_strategy_version_column()
 
-    def ensure_strategy_version_column(self) -> None:
-        """
-        Make the Signals schema self-healing.
+    @staticmethod
+    def _column_letter(column: int) -> str:
+        result = ""
+        while column:
+            column, remainder = divmod(column - 1, 26)
+            result = chr(65 + remainder) + result
+        return result
 
-        - If Strategy Version is missing, add it at the end.
-        - If it already exists, keep it.
-        - Fill blank historical rows with v1.
-        - Never overwrite an existing version.
-        """
+    def ensure_strategy_version_column(self) -> None:
+        """Add Strategy Version and migrate blanks using one read + one batch write."""
         worksheet = self.get_worksheet("Signals")
         headers = worksheet.row_values(1)
         column_name = "Strategy Version"
 
         if column_name not in headers:
-            new_column = len(headers) + 1
-            if new_column > worksheet.col_count:
-                worksheet.add_cols(new_column - worksheet.col_count)
-            worksheet.update_cell(1, new_column, column_name)
+            column = len(headers) + 1
+            if column > worksheet.col_count:
+                worksheet.add_cols(column - worksheet.col_count)
+            worksheet.update_cell(1, column, column_name)
             headers.append(column_name)
             print("Google Sheets migration: added Strategy Version column.")
         else:
-            new_column = headers.index(column_name) + 1
+            column = headers.index(column_name) + 1
 
-        records = worksheet.get_all_records()
-        migrated = 0
+        values = worksheet.get_all_values()
+        if len(values) <= 1:
+            return
 
-        for row_number, record in enumerate(records, start=2):
-            current = str(record.get(column_name, "")).strip()
-            if not current:
-                worksheet.update_cell(row_number, new_column, "v1")
-                migrated += 1
+        blanks = []
+        for row_number, row in enumerate(values[1:], start=2):
+            current = row[column - 1] if len(row) >= column else ""
+            if not str(current).strip():
+                blanks.append(row_number)
 
-        if migrated:
-            print(f"Google Sheets migration: marked {migrated} historical signals as v1.")
+        if not blanks:
+            return
+
+        # Write contiguous ranges in batches instead of one API request per row.
+        start = previous = blanks[0]
+        ranges = []
+        for row_number in blanks[1:]:
+            if row_number == previous + 1:
+                previous = row_number
+            else:
+                ranges.append((start, previous))
+                start = previous = row_number
+        ranges.append((start, previous))
+
+        col_letter = self._column_letter(column)
+        for range_start, range_end in ranges:
+            worksheet.update(
+                f"{col_letter}{range_start}:{col_letter}{range_end}",
+                [["v1"] for _ in range(range_start, range_end + 1)],
+                value_input_option="USER_ENTERED",
+            )
+
+        print(
+            f"Google Sheets migration: marked {len(blanks)} historical signals as v1."
+        )
+
+        self._records_cache.pop("Signals", None)
 
     def append_row(self, worksheet_name: str, row: List[Any]) -> None:
-        self.get_worksheet(worksheet_name).append_row(row, value_input_option="USER_ENTERED")
+        self.get_worksheet(worksheet_name).append_row(
+            row,
+            value_input_option="USER_ENTERED",
+        )
+        self._records_cache.pop(worksheet_name, None)
 
     def append_rows(self, worksheet_name: str, rows: List[List[Any]]) -> None:
         if rows:
-            self.get_worksheet(worksheet_name).append_rows(rows, value_input_option="USER_ENTERED")
+            self.get_worksheet(worksheet_name).append_rows(
+                rows,
+                value_input_option="USER_ENTERED",
+            )
+            self._records_cache.pop(worksheet_name, None)
 
-    def get_all_records(self, worksheet_name: str) -> List[dict]:
-        return self.get_worksheet(worksheet_name).get_all_records()
+    def get_all_records(
+        self,
+        worksheet_name: str,
+        refresh: bool = False,
+    ) -> List[dict]:
+        if not refresh and worksheet_name in self._records_cache:
+            return self._records_cache[worksheet_name]
+
+        records = self.get_worksheet(worksheet_name).get_all_records()
+        self._records_cache[worksheet_name] = records
+        return records
 
     def get_all_values(self, worksheet_name: str) -> List[List[Any]]:
         return self.get_worksheet(worksheet_name).get_all_values()
 
-    def update_cell(self, worksheet_name: str, row: int, column: int, value: Any) -> None:
-        self.get_worksheet(worksheet_name).update_cell(row, column, value)
+    def update_cell(
+        self,
+        worksheet_name: str,
+        row: int,
+        column: int,
+        value: Any,
+    ) -> None:
+        self.get_worksheet(worksheet_name).update_cell(
+            row,
+            column,
+            value,
+        )
+        self._records_cache.pop(worksheet_name, None)
 
-    def update_range(self, worksheet_name: str, cell_range: str, values: List[List[Any]]) -> None:
-        self.get_worksheet(worksheet_name).update(cell_range, values, value_input_option="USER_ENTERED")
+    def update_range(
+        self,
+        worksheet_name: str,
+        cell_range: str,
+        values: List[List[Any]],
+    ) -> None:
+        self.get_worksheet(worksheet_name).update(
+            cell_range,
+            values,
+            value_input_option="USER_ENTERED",
+        )
+        self._records_cache.pop(worksheet_name, None)
 
-    def find_row(self, worksheet_name: str, column_name: str, search_value: Any) -> Optional[int]:
-        for index, record in enumerate(self.get_all_records(worksheet_name), start=2):
+    def find_row(
+        self,
+        worksheet_name: str,
+        column_name: str,
+        search_value: Any,
+    ) -> Optional[int]:
+        records = self.get_all_records(worksheet_name)
+        for index, record in enumerate(records, start=2):
             if str(record.get(column_name, "")).strip() == str(search_value).strip():
                 return index
         return None
 
     def signal_exists(self, signal_id: str) -> bool:
-        return self.find_row("Signals", "Signal ID", signal_id) is not None
+        return self.find_row(
+            "Signals",
+            "Signal ID",
+            signal_id,
+        ) is not None
 
-    def update_signal(self, signal_id: str, updates: dict) -> bool:
+    def update_signal(
+        self,
+        signal_id: str,
+        updates: dict,
+    ) -> bool:
         worksheet = self.get_worksheet("Signals")
-        records = worksheet.get_all_records()
+        records = self.get_all_records("Signals")
         if not records:
             return False
 
         headers = worksheet.row_values(1)
         signal_row = None
+
         for index, record in enumerate(records, start=2):
             if str(record.get("Signal ID", "")).strip() == str(signal_id).strip():
                 signal_row = index
@@ -174,15 +269,35 @@ class GoogleSheetsTracker:
         if signal_row is None:
             return False
 
+        row = list(worksheet.row_values(signal_row))
+        if len(row) < len(headers):
+            row.extend([""] * (len(headers) - len(row)))
+
         for field, value in updates.items():
             if field not in headers:
-                raise ValueError(f"Column '{field}' does not exist in Signals.")
-            worksheet.update_cell(signal_row, headers.index(field) + 1, value)
+                raise ValueError(
+                    f"Column '{field}' does not exist in Signals."
+                )
+            row[headers.index(field)] = value
+
+        worksheet.update(
+            f"A{signal_row}:{self._column_letter(len(headers))}{signal_row}",
+            [row[:len(headers)]],
+            value_input_option="USER_ENTERED",
+        )
+
+        # Keep in-memory cache synchronized without another read.
+        for record in records:
+            if str(record.get("Signal ID", "")).strip() == str(signal_id).strip():
+                record.update(updates)
+                break
+
         return True
 
     def get_open_signals(self) -> List[dict]:
+        records = self.get_all_records("Signals")
         return [
-            record for record in self.get_all_records("Signals")
+            record for record in records
             if str(record.get("Status", "")).strip().upper() == "OPEN"
         ]
 
@@ -190,19 +305,31 @@ class GoogleSheetsTracker:
         signal_id = signal.get("Signal ID")
         if not signal_id:
             raise ValueError("Signal must contain 'Signal ID'.")
+
+        # One cached Signals read for all duplicate checks during a run.
         if self.signal_exists(signal_id):
             return False
 
-        # Ensure migrations are complete before appending so the row matches the header.
-        self.ensure_strategy_version_column()
         headers = self.get_worksheet("Signals").row_values(1)
         row = [signal.get(header, "") for header in headers]
         self.append_row("Signals", row)
+
+        # Update cache immediately so the next signal does not need another read.
+        self._records_cache.setdefault("Signals", []).append(
+            {header: signal.get(header, "") for header in headers}
+        )
         return True
 
     def add_price_log(self, price_data: dict) -> None:
         headers = self.SHEETS["Price_Log"]
-        self.append_row("Price_Log", [price_data.get(header, "") for header in headers])
+        self.append_row(
+            "Price_Log",
+            [price_data.get(header, "") for header in headers],
+        )
+
+        self._records_cache.setdefault("Price_Log", []).append(
+            {header: price_data.get(header, "") for header in headers}
+        )
 
     def initialize(self) -> None:
         self.initialize_sheets()
