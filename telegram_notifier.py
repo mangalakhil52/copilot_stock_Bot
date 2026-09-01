@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 import requests
 
@@ -15,7 +15,6 @@ STRATEGY_VERSION = "v2"
 
 def format_telegram_alert(picks: List[SwingPick]) -> str:
     """Build the daily Telegram text alert for the active strategy."""
-
     if not picks:
         return (
             "📉 *Indian Swing Stock Alerts*\n\n"
@@ -24,7 +23,6 @@ def format_telegram_alert(picks: List[SwingPick]) -> str:
         )
 
     run_time = datetime.now().strftime("%Y-%m-%d %H:%M")
-
     message_lines = [
         "🚨 *COPILOT SWING ALERT*",
         f"Strategy: `{STRATEGY_VERSION.upper()}`",
@@ -39,13 +37,11 @@ def format_telegram_alert(picks: List[SwingPick]) -> str:
             if pick.avg_volume and pick.avg_volume > 0
             else "N/A"
         )
-
         distance_ema20 = (
             ((pick.close - pick.ema20) / pick.ema20) * 100
             if pick.ema20
             else 0
         )
-
         risk_reward = (
             pick.reward_pct / pick.risk_pct
             if pick.risk_pct and pick.risk_pct > 0
@@ -66,7 +62,6 @@ def format_telegram_alert(picks: List[SwingPick]) -> str:
             f"⏳ Holding: `{pick.holding_period}`\n"
             f"_Why: {pick.comment}_"
         )
-
         message_lines.extend(["", block])
 
     message_lines.extend(
@@ -77,12 +72,11 @@ def format_telegram_alert(picks: List[SwingPick]) -> str:
             "⚠️ _For research/tracking only. Validate the setup before taking any trade._",
         ]
     )
-
     return "\n".join(message_lines)
 
 
-def _generate_charts(picks: Sequence[SwingPick]) -> List[Path]:
-    """Generate one detailed chart per pick; chart failure never blocks Telegram text."""
+def _generate_charts(picks: Sequence[SwingPick]) -> List[Tuple[SwingPick, Path]]:
+    """Generate one chart per pick without changing pick-to-chart mapping on failures."""
     try:
         from chart_generator import generate_stock_chart
         from tracker.market_data import GoogleFinanceMarketData
@@ -92,7 +86,7 @@ def _generate_charts(picks: Sequence[SwingPick]) -> List[Path]:
             return []
 
         market_data = GoogleFinanceMarketData()
-        chart_paths: List[Path] = []
+        results: List[Tuple[SwingPick, Path]] = []
 
         for pick in picks:
             try:
@@ -102,14 +96,14 @@ def _generate_charts(picks: Sequence[SwingPick]) -> List[Path]:
                     lookback_days=140,
                 )
                 if chart_path:
-                    chart_paths.append(chart_path)
+                    results.append((pick, chart_path))
                     print(f"Generated Telegram chart: {chart_path}")
                 else:
                     print(f"Chart unavailable for {pick.ticker}: insufficient market data.")
             except Exception as exc:
                 print(f"Chart generation failed for {pick.ticker}: {exc}")
 
-        return chart_paths
+        return results
 
     except Exception as exc:
         print(f"Chart generation setup failed: {exc}")
@@ -122,11 +116,7 @@ def send_telegram_alert(
     message: str,
     picks: Optional[Sequence[SwingPick]] = None,
 ) -> None:
-    """
-    Send the text alert followed by one detailed chart image per stock.
-
-    If chart generation/upload fails, the text alert remains successful.
-    """
+    """Send the text alert followed by one detailed chart image per stock."""
     base_url = f"https://api.telegram.org/bot{bot_token}"
 
     message_response = requests.post(
@@ -148,13 +138,16 @@ def send_telegram_alert(
     if not picks:
         return
 
-    chart_paths = _generate_charts(picks)
-
-    for pick, chart_path in zip(picks, chart_paths):
+    for pick, chart_path in _generate_charts(picks):
+        risk_reward = (
+            pick.reward_pct / pick.risk_pct
+            if pick.risk_pct and pick.risk_pct > 0
+            else 0
+        )
         caption = (
             f"📈 *{pick.ticker} — Strategy {STRATEGY_VERSION.upper()}*\n"
             f"Entry ₹{pick.entry:.2f} | Target ₹{pick.target:.2f} | "
-            f"SL ₹{pick.stop_loss:.2f} | R:R 1:{pick.reward_pct / pick.risk_pct:.2f}"
+            f"SL ₹{pick.stop_loss:.2f} | R:R 1:{risk_reward:.2f}"
         )
 
         try:
